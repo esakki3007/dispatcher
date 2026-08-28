@@ -1,70 +1,176 @@
+// dispatcher/batch-worker/batch.publisher.ts
+
 import {
-  ServiceBusClient,
   ServiceBusSender,
 } from "@azure/service-bus";
+
+import {
+  SerializedBatchMessage,
+} from "./batch.types";
+
 import { config } from "../../config/config";
-import { BatchMessage } from "./batch.types";
 
 export class BatchPublisher {
-  private readonly sender: ServiceBusSender;
 
   constructor(
-    client: ServiceBusClient,
-  ) {
-    this.sender = client.createSender(
-      config.batchQueueName,
+    private readonly sender: ServiceBusSender,
+  ) {}
+
+  /**
+   * Publishes batches with bounded concurrency.
+   *
+   * This is the backpressure mechanism.
+   */
+  async publishBatches(
+    batches: AsyncIterable<SerializedBatchMessage>,
+  ): Promise<number> {
+
+    let totalBatches = 0;
+
+    const inFlight =
+      new Set<Promise<void>>();
+
+    for await (
+      const batch of batches
+    ) {
+
+      totalBatches++;
+
+      const publishPromise =
+        this.publishBatch(batch);
+
+      inFlight.add(
+        publishPromise,
+      );
+
+      publishPromise.finally(
+        () => {
+          inFlight.delete(
+            publishPromise,
+          );
+        },
+      );
+
+      /*
+       * BACKPRESSURE
+       *
+       * Do not consume another batch once
+       * we have reached the configured number
+       * of in-flight Service Bus sends.
+       */
+      if (
+        inFlight.size >=
+        config.batchPublishConcurrency
+      ) {
+
+        await Promise.race(
+          inFlight,
+        );
+      }
+    }
+
+    /*
+     * EOF.
+     *
+     * Wait for every outstanding message.
+     */
+    await Promise.all(
+      inFlight,
     );
+
+    return totalBatches;
   }
 
-  async publish(
-    message: BatchMessage,
+  private async publishBatch(
+    batch: SerializedBatchMessage,
   ): Promise<void> {
-    const serialized =
-      JSON.stringify(message);
 
-    const byteLength =
+    /*
+     * Build the final JSON body using the
+     * already serialized records.
+     *
+     * This avoids JSON.parse().
+     */
+    const body = this.buildBody(
+      batch,
+    );
+
+    const actualByteLength =
       Buffer.byteLength(
-        serialized,
+        body,
         "utf8",
       );
 
+    /*
+     * Absolute safety check.
+     */
     if (
-      byteLength >
+      actualByteLength >
       config.batchHardMaxBytes
     ) {
+
       throw new Error(
-        `Batch ${message.batchNumber} exceeds hard limit. ` +
-        `Actual=${byteLength}, ` +
-        `Maximum=${config.batchHardMaxBytes}`,
+        [
+          "Service Bus batch exceeds hard limit.",
+          `correlationId=${batch.correlationId}`,
+          `batchNumber=${batch.batchNumber}`,
+          `byteLength=${actualByteLength}`,
+          `hardLimit=${config.batchHardMaxBytes}`,
+        ].join(" "),
       );
     }
 
-    const finalMessage: BatchMessage = {
-      ...message,
-      byteLength,
-    };
-
     await this.sender.sendMessages({
-      body: finalMessage,
+      body,
+
+      /*
+       * Deterministic message ID.
+       *
+       * Useful for duplicate detection/idempotency.
+       */
       messageId:
-        `${message.correlationId}:${message.batchNumber}`,
-      correlationId:
-        message.correlationId,
-      applicationProperties: {
-        batchNumber:
-          message.batchNumber,
-        totalBatches:
-          message.totalBatches,
-        count:
-          message.count,
-        totalCount:
-          message.totalCount,
-        byteLength,
-      },
+        `${batch.correlationId}:${batch.batchNumber}`,
     });
   }
 
-  async close(): Promise<void> {
-    await this.sender.close();
+  private buildBody(
+    batch: SerializedBatchMessage,
+  ): string {
+
+    /*
+     * We cannot simply JSON.stringify(batch)
+     * because serializedRecords are already JSON.
+     *
+     * Construct the JSON body directly.
+     */
+
+    const recordsJson =
+      `[${batch.serializedRecords.join(",")}]`;
+
+    return (
+      "{" +
+
+      `"messageType":"BATCH",` +
+
+      `"correlationId":${JSON.stringify(
+        batch.correlationId,
+      )},` +
+
+      `"blobPath":${JSON.stringify(
+        batch.blobPath,
+      )},` +
+
+      `"batchNumber":${batch.batchNumber},` +
+
+      `"count":${batch.count},` +
+
+      `"totalCount":${batch.totalCount},` +
+
+      `"byteLength":${batch.byteLength},` +
+
+      `"records":${recordsJson}` +
+
+      "}"
+    );
   }
 }
