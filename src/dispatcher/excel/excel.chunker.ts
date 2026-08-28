@@ -1,10 +1,15 @@
+// dispatcher/excel/excel.chunker.ts
+
 import { config } from "../../config/config";
 import { ExcelRecord } from "./excel.types";
+import {
+  serializeRecord,
+  SerializedRecord,
+} from "./excel.serializer";
 
-export interface BatchChunk {
-  records: ExcelRecord[];
-  estimatedByteLength: number;
-}
+import {
+  SerializedBatchMessage,
+} from "../batch-worker/batch.types";
 
 export interface ChunkMetadata {
   correlationId: string;
@@ -12,131 +17,309 @@ export interface ChunkMetadata {
   totalCount: number;
 }
 
-function serializeRecord(
-  record: ExcelRecord,
-): { json: string; bytes: number } {
-  const json = JSON.stringify(record);
-
-  return {
-    json,
-    bytes: Buffer.byteLength(json, "utf8"),
-  };
-}
-
-/**
- * The chunker uses a conservative envelope size.
- *
- * We deliberately do not repeatedly stringify the growing
- * records array. Each record is serialized once and a
- * running byte counter is maintained.
- */
-function getConservativeEnvelopeBytes(
+function calculateEnvelopeOverhead(
   metadata: ChunkMetadata,
+  batchNumber: number,
+  count: number,
 ): number {
-  const envelope = JSON.stringify({
-    correlationId: metadata.correlationId,
-    blobPath: metadata.blobPath,
-    batchNumber: 999999,
-    totalBatches: 999999,
-    count: 999999,
-    totalCount: metadata.totalCount,
-    byteLength: 999999,
+
+  const envelope = {
+    messageType: "BATCH",
+
+    correlationId:
+      metadata.correlationId,
+
+    blobPath:
+      metadata.blobPath,
+
+    batchNumber,
+
+    count,
+
+    totalCount:
+      metadata.totalCount,
+
+    byteLength: 0,
+
     records: [],
-  });
+  };
 
-  return Buffer.byteLength(envelope, "utf8");
-}
-
-export function chunkRecords(
-  metadata: ChunkMetadata,
-  records: ExcelRecord[],
-): BatchChunk[] {
-  if (!records.length) {
-    return [];
-  }
-
-  const chunks: BatchChunk[] = [];
+  const envelopeJson =
+    JSON.stringify(envelope);
 
   const envelopeBytes =
-    getConservativeEnvelopeBytes(metadata);
+    Buffer.byteLength(
+      envelopeJson,
+      "utf8",
+    );
 
-  let currentRecords: ExcelRecord[] = [];
-  let currentBytes = envelopeBytes;
+  const emptyRecordsBytes =
+    Buffer.byteLength(
+      "[]",
+      "utf8",
+    );
 
-  for (const record of records) {
-    const serialized = serializeRecord(record);
+  return (
+    envelopeBytes -
+    emptyRecordsBytes
+  );
+}
 
+function calculateBatchByteLength(
+  metadata: ChunkMetadata,
+  batchNumber: number,
+  records: SerializedRecord[],
+): number {
+
+  const envelopeBytes =
+    calculateEnvelopeOverhead(
+      metadata,
+      batchNumber,
+      records.length,
+    );
+
+  let recordBytes = 0;
+
+  for (
+    const record of records
+  ) {
+    recordBytes +=
+      record.byteLength;
+  }
+
+  const commaBytes =
+    Math.max(
+      records.length - 1,
+      0,
+    );
+
+  const bracketsBytes = 2;
+
+  return (
+    envelopeBytes +
+    recordBytes +
+    commaBytes +
+    bracketsBytes
+  );
+}
+
+export async function* chunkRecords(
+  metadata: ChunkMetadata,
+  records: AsyncIterable<ExcelRecord>,
+): AsyncGenerator<SerializedBatchMessage> {
+
+  let batchNumber = 1;
+
+  let currentRecords: SerializedRecord[] = [];
+
+  let currentRecordBytes = 0;
+
+  for await (
+    const record of records
+  ) {
+
+    /*
+     * SERIALIZE EXACTLY ONCE.
+     */
+    const serialized =
+      serializeRecord(record);
+
+    /*
+     * Check single record.
+     */
     const singleRecordBytes =
-      envelopeBytes +
-      serialized.bytes;
+      calculateBatchByteLength(
+        metadata,
+        batchNumber,
+        [serialized],
+      );
 
     if (
       singleRecordBytes >
       config.batchHardMaxBytes
     ) {
+
       throw new Error(
-        `Single record exceeds hard batch limit: ${config.batchHardMaxBytes} bytes`,
+        [
+          "Single record exceeds hard batch limit.",
+          `correlationId=${metadata.correlationId}`,
+          `recordBytes=${serialized.byteLength}`,
+          `batchBytes=${singleRecordBytes}`,
+        ].join(" "),
       );
     }
 
-    const separatorBytes =
-      currentRecords.length > 0 ? 1 : 0;
+    /*
+     * Candidate calculation.
+     *
+     * NO array copy.
+     */
+    const candidateCount =
+      currentRecords.length + 1;
+
+    const candidateRecordBytes =
+      currentRecordBytes +
+      serialized.byteLength;
+
+    const candidateEnvelopeBytes =
+      calculateEnvelopeOverhead(
+        metadata,
+        batchNumber,
+        candidateCount,
+      );
+
+    const candidateCommaBytes =
+      candidateCount - 1;
 
     const candidateBytes =
-      currentBytes +
-      separatorBytes +
-      serialized.bytes;
+      candidateEnvelopeBytes +
+      candidateRecordBytes +
+      candidateCommaBytes +
+      2;
 
+    /*
+     * TARGET LIMIT
+     */
     if (
       currentRecords.length > 0 &&
-      candidateBytes > config.batchTargetBytes
+      candidateBytes >
+        config.batchTargetBytes
     ) {
-      chunks.push({
-        records: currentRecords,
-        estimatedByteLength: currentBytes,
-      });
 
-      currentRecords = [record];
-      currentBytes =
-        envelopeBytes +
-        serialized.bytes;
+      yield buildBatch(
+        metadata,
+        batchNumber,
+        currentRecords,
+        currentRecordBytes,
+      );
+
+      batchNumber++;
+
+      currentRecords = [
+        serialized,
+      ];
+
+      currentRecordBytes =
+        serialized.byteLength;
 
       continue;
     }
 
+    /*
+     * HARD LIMIT
+     */
     if (
       candidateBytes >
       config.batchHardMaxBytes
     ) {
-      if (!currentRecords.length) {
+
+      if (
+        currentRecords.length === 0
+      ) {
         throw new Error(
-          "Unable to create a batch within the hard message limit",
+          "Unable to create batch within hard limit.",
         );
       }
 
-      chunks.push({
-        records: currentRecords,
-        estimatedByteLength: currentBytes,
-      });
+      yield buildBatch(
+        metadata,
+        batchNumber,
+        currentRecords,
+        currentRecordBytes,
+      );
 
-      currentRecords = [record];
-      currentBytes =
-        envelopeBytes +
-        serialized.bytes;
+      batchNumber++;
+
+      currentRecords = [
+        serialized,
+      ];
+
+      currentRecordBytes =
+        serialized.byteLength;
 
       continue;
     }
 
-    currentRecords.push(record);
-    currentBytes = candidateBytes;
+    /*
+     * Add to current batch.
+     */
+    currentRecords.push(
+      serialized,
+    );
+
+    currentRecordBytes =
+      candidateRecordBytes;
   }
 
-  if (currentRecords.length) {
-    chunks.push({
-      records: currentRecords,
-      estimatedByteLength: currentBytes,
-    });
+  /*
+   * Final batch.
+   */
+  if (
+    currentRecords.length > 0
+  ) {
+
+    yield buildBatch(
+      metadata,
+      batchNumber,
+      currentRecords,
+      currentRecordBytes,
+    );
+  }
+}
+
+function buildBatch(
+  metadata: ChunkMetadata,
+  batchNumber: number,
+  records: SerializedRecord[],
+  recordBytes: number,
+): SerializedBatchMessage {
+
+  const byteLength =
+    calculateBatchByteLength(
+      metadata,
+      batchNumber,
+      records,
+    );
+
+  if (
+    byteLength >
+    config.batchHardMaxBytes
+  ) {
+
+    throw new Error(
+      [
+        "Batch exceeds hard limit.",
+        `correlationId=${metadata.correlationId}`,
+        `batchNumber=${batchNumber}`,
+        `byteLength=${byteLength}`,
+        `hardLimit=${config.batchHardMaxBytes}`,
+      ].join(" "),
+    );
   }
 
-  return chunks;
+  return {
+    messageType: "BATCH",
+
+    correlationId:
+      metadata.correlationId,
+
+    blobPath:
+      metadata.blobPath,
+
+    batchNumber,
+
+    count:
+      records.length,
+
+    totalCount:
+      metadata.totalCount,
+
+    byteLength,
+
+    serializedRecords:
+      records.map(
+        (record) =>
+          record.json,
+      ),
+  };
 }
