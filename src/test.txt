@@ -1,0 +1,459 @@
+## 2. Solution Overview
+
+The proposed solution extends the existing GRACE (WebCheck and WebFileCheck) application to provide a common integration layer for Partner Screening and Payment Screening APIs.
+
+GRACE will act as the intermediary between external consumers and the NetReveal downstream screening platform. The solution supports both SOAP and REST consumers while keeping the core screening and orchestration logic independent of the communication protocol.
+
+The solution follows a layered and modular architecture in which each responsibility is isolated:
+
+* **API / Transport Layer** – Exposes SOAP and REST endpoints and handles protocol-specific communication.
+* **Validation Layer** – Validates incoming SOAP XML and REST JSON requests against the applicable API contracts.
+* **Adapter / Transformation Layer** – Converts partner-specific request and response formats into and from internal canonical models.
+* **Application / Orchestration Layer** – Implements the screening use cases and controls the interaction with NetReveal.
+* **Domain Layer** – Defines the internal canonical request, response, and business models.
+* **Infrastructure Layer** – Provides NetReveal connectivity and common technical capabilities such as HTTP communication, timeout handling, resilience, logging, metrics, and tracing.
+
+The architecture is designed so that SOAP and REST interfaces follow the same underlying business flow.
+
+```text
+SOAP Request ──┐
+               ├──> Validation ──> Adapter ──> Canonical Model
+REST Request ──┘                                  │
+                                                  ▼
+                                         Application Service
+                                                  │
+                                                  ▼
+                                         NetReveal Client
+                                                  │
+                                                  ▼
+                                              NetReveal
+                                                  │
+                                                  ▼
+                                         Canonical Response
+                                                  │
+                              ┌───────────────────┴───────────────────┐
+                              ▼                                       ▼
+                       SOAP Transformation                    REST Transformation
+                              │                                       │
+                              ▼                                       ▼
+                       SOAP Response                           REST Response
+```
+
+A key architectural principle is that NetReveal-specific models and communication details are isolated from the external API contracts. This prevents partner-specific API changes from propagating into the core application and prevents changes in NetReveal from directly affecting the external interfaces.
+
+The solution will initially be implemented as a **modular application within the existing GRACE deployment** rather than creating separate microservices for each API. The internal module boundaries will allow individual capabilities to evolve independently and provide a path for future service extraction if required by scale, ownership, or operational requirements.
+
+---
+
+## 3. Design Principles
+
+The following principles will guide the detailed design and implementation of the GRACE screening integrations.
+
+### 3.1 Separation of Concerns
+
+Each layer must have a clearly defined responsibility.
+
+For example:
+
+* SOAP adapters should handle SOAP-specific processing.
+* REST adapters should handle REST-specific processing.
+* Mappers should handle transformations.
+* Application services should handle business orchestration.
+* The NetReveal client should handle downstream communication.
+
+Business logic should not be embedded inside controllers, SOAP handlers, or HTTP clients.
+
+---
+
+### 3.2 Protocol Independence
+
+The core screening logic must remain independent of whether the request originated from SOAP or REST.
+
+Both protocols should ultimately produce a common internal representation:
+
+```text
+SOAP ──> SOAP Adapter ──┐
+                        ├──> Canonical Request
+REST ──> REST Adapter ──┘
+```
+
+The same application service can therefore process both types of requests.
+
+---
+
+### 3.3 Canonical Data Model
+
+Partner-specific request and response structures should not be passed directly through the application.
+
+Instead, external payloads should be converted into canonical GRACE models.
+
+```text
+Partner Request
+      │
+      ▼
+Partner-specific DTO
+      │
+      ▼
+Canonical GRACE Request
+      │
+      ▼
+NetReveal Request
+```
+
+Similarly, NetReveal responses should first be converted into a canonical response before being transformed into the partner-specific response format.
+
+This reduces coupling between partner contracts and downstream contracts.
+
+---
+
+### 3.4 Adapter-Based Integration
+
+External systems should be integrated through well-defined adapters.
+
+Partner-specific transformations should remain isolated within the corresponding partner/API adapter, while NetReveal communication should be isolated behind a dedicated NetReveal adapter/client.
+
+This allows individual partner contracts or downstream interfaces to change without requiring changes to the core screening logic.
+
+---
+
+### 3.5 Reuse Common Capabilities
+
+Common functionality should be implemented once and reused across the screening APIs.
+
+Examples include:
+
+* Request correlation
+* Authentication
+* Validation utilities
+* Error handling
+* HTTP communication
+* NetReveal connectivity
+* Timeout handling
+* Logging
+* Metrics
+* Distributed tracing
+* Configuration management
+
+API-specific logic should only be introduced where the business or contract requires different behavior.
+
+---
+
+### 3.6 Stateless Processing
+
+GRACE should remain stateless for synchronous screening transactions wherever possible.
+
+Request-specific state should not be stored in application instance memory. This allows multiple GRACE instances to process requests interchangeably and enables horizontal scaling.
+
+```text
+                 ┌── GRACE Instance 1
+                 │
+API Gateway ─────┼── GRACE Instance 2
+                 │
+                 └── GRACE Instance 3
+```
+
+This also avoids dependency on a particular application instance during request processing.
+
+---
+
+### 3.7 Resilience and Controlled Downstream Communication
+
+NetReveal is a critical downstream dependency. Communication with NetReveal must therefore have explicit resilience policies.
+
+The NetReveal client should support appropriate:
+
+* Connection and request timeouts
+* Controlled retry policies where retry is safe
+* Circuit breaker behavior
+* Connection pooling
+* Failure handling
+* Downstream response validation
+
+Retries must be applied carefully to avoid duplicate processing where the downstream operation is not safely retryable.
+
+---
+
+### 3.8 Consistent Error Handling
+
+Errors should be represented internally using a common GRACE error model.
+
+Protocol-specific adapters will convert these errors into the appropriate external representation.
+
+For example:
+
+```text
+                     GRACE Error
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+        REST Error Response       SOAP Fault
+```
+
+This ensures consistent error classification and logging across all APIs while preserving the required SOAP and REST contracts.
+
+---
+
+### 3.9 Observability by Design
+
+Every screening transaction should be traceable across GRACE and its downstream interaction with NetReveal.
+
+The design should support:
+
+* Correlation ID
+* Request/transaction ID
+* Partner identification
+* API identification
+* Protocol identification
+* Structured application logs
+* Performance metrics
+* Distributed tracing
+* Downstream latency and failure metrics
+
+Sensitive customer or payment information must not be written to logs unless explicitly permitted by the applicable security and data-protection requirements.
+
+---
+
+### 3.10 Configuration over Hardcoding
+
+Environment-specific and integration-specific values should be externalized through configuration.
+
+Examples include:
+
+* NetReveal URLs
+* Connection timeouts
+* Retry configuration
+* Circuit breaker thresholds
+* Authentication configuration
+* Partner-specific configuration
+* Feature flags
+
+The application code should not contain environment-specific values.
+
+---
+
+### 3.11 Extensibility
+
+The architecture should allow additional partners, screening types, and downstream capabilities to be added without modifying existing implementations unnecessarily.
+
+A new partner should primarily require:
+
+```text
+New API Contract
+      +
+New Partner Adapter / Mapper
+      +
+Configuration
+```
+
+rather than changes to the core screening orchestration.
+
+---
+
+### 3.12 Single Responsibility for Business Orchestration
+
+Business workflows should be implemented by application services.
+
+For example, the Payment Screening flow may involve:
+
+```text
+Payment Check
+      │
+      ▼
+Embargo / PEP Screening
+      │
+      ▼
+Evaluate Result
+      │
+      ├── GO   ──> Final Response
+      │
+      └── HOLD ──> Decision State
+                         │
+                         ▼
+                    Final Response
+```
+
+The orchestration of this flow belongs to the Payment Screening application service rather than to the NetReveal client or API controller.
+
+---
+
+## 4. High-Level Flow
+
+### 4.1 Common Request Flow
+
+All screening requests follow the general processing pattern below:
+
+```text
+External Consumer
+       │
+       ▼
+API Gateway / GRACE Endpoint
+       │
+       ▼
+Protocol Detection / Endpoint
+       │
+       ├────────────── SOAP
+       │                  │
+       │                  ▼
+       │             XML Parsing
+       │                  │
+       │                  ▼
+       │             SOAP Schema
+       │             Validation
+       │
+       └────────────── REST
+                          │
+                          ▼
+                     JSON Schema
+                     Validation
+                          │
+                          └──────────────┐
+                                         ▼
+                               Partner/API Adapter
+                                         │
+                                         ▼
+                                Canonical Request
+                                         │
+                                         ▼
+                               Application Service
+                                         │
+                                         ▼
+                                NetReveal Adapter
+                                         │
+                                         ▼
+                                   NetReveal API
+                                         │
+                                         ▼
+                                NetReveal Response
+                                         │
+                                         ▼
+                              Canonical Response
+                                         │
+                          ┌──────────────┴──────────────┐
+                          ▼                             ▼
+                   SOAP Response Mapper          REST Response Mapper
+                          │                             │
+                          ▼                             ▼
+                    SOAP Response                REST Response
+                          │                             │
+                          └──────────────┬──────────────┘
+                                         ▼
+                                  External Consumer
+```
+
+---
+
+### 4.2 Partner Screening High-Level Flow
+
+The six Partner Screening APIs will follow the common screening processing model:
+
+```text
+Partner
+   │
+   ▼
+check / checkCustomer / checkCustomerList
+pepCheck / pepCheckCustomer / pepCheckCustomerList
+   │
+   ▼
+Validate Request
+   │
+   ▼
+Partner → Canonical Transformation
+   │
+   ▼
+Partner Screening Service
+   │
+   ▼
+NetReveal Request Transformation
+   │
+   ▼
+NetReveal Screening API
+   │
+   ▼
+NetReveal Response
+   │
+   ▼
+Canonical Response
+   │
+   ▼
+Canonical → Partner Transformation
+   │
+   ▼
+SOAP / REST Response
+```
+
+The specific NetReveal operation and transformation will depend on the screening API being invoked.
+
+---
+
+### 4.3 Payment Screening High-Level Flow
+
+Payment Screening contains multiple operations and supports Embargo and PEP screening.
+
+```text
+Payment Consumer
+       │
+       ▼
+Payment Check
+       │
+       ├───────────────┐
+       ▼               ▼
+    Embargo           PEP
+    Request          Request
+       │               │
+       └───────┬───────┘
+               ▼
+          NetReveal
+               │
+               ▼
+        Screening Result
+               │
+        ┌──────┴──────┐
+        ▼             ▼
+       GO            HOLD
+        │             │
+        │             ▼
+        │       Decision State
+        │       / appropriate
+        │       follow-up flow
+        │             │
+        └──────┬──────┘
+               ▼
+        Final GRACE Result
+               │
+               ▼
+          SOAP / REST
+```
+
+The `decisionCheck` and `decisionState` operations are exposed as separate API capabilities and will have their own request validation, transformation, NetReveal invocation, and response transformation.
+
+---
+
+### 4.4 Response Flow
+
+The response follows the reverse transformation path:
+
+```text
+NetReveal Response
+       │
+       ▼
+NetReveal Response Mapper
+       │
+       ▼
+Canonical GRACE Response
+       │
+       ▼
+API-specific Response Mapper
+       │
+       ├───────────────┐
+       ▼               ▼
+     SOAP              REST
+       │               │
+       ▼               ▼
+  SOAP Envelope       JSON
+       │               │
+       └───────┬───────┘
+               ▼
+          Consumer
+```
+
+This ensures that the downstream NetReveal response format remains completely isolated from the external partner contract.
