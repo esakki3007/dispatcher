@@ -61,3 +61,17 @@ At a high level, the architecture consists of the following layers:
 
 SOAP Request │ ▼ XML Parsing │ ▼ XSD Validation │ ▼ Valid Request REST Request │ ▼ JSON Parsing │ ▼ JSON Schema Validation │ ▼ Valid Request
 
+
+| No. | Task                                          | Area    | Sprint    | Remark                                                                                                                          |
+| --: | --------------------------------------------- | ------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+|   1 | **GRACE Legacy API Setup & Connectivity**     | Backend | Sprint 20 | Set up Fastify API structure, environment configuration, legacy API connectivity and required endpoint configuration            |
+|   2 | **Basic Authentication & User DB Validation** | Backend | Sprint 20 | Implement Basic Auth for Partner Data and validate user credentials/user details against application DB                         |
+|   3 | **SOAP & REST Transport Layer**               | Backend | Sprint 20 | Implement SOAP and REST endpoints, SOAP XML parsing, REST JSON handling and common request/response processing                  |
+|   4 | **SOAP XSD & REST JSON Schema Validation**    | Backend | Sprint 20 | Implement contract-level validation for SOAP/XML and REST/JSON requests                                                         |
+|   5 | **Canonical Request & Response Model**        | Backend | Sprint 20 | Define common internal models for Partner and Payment requests/responses independent of SOAP, REST and NetReveal contracts      |
+|   6 | **Partner Data SOAP → Canonical Mapping**     | Backend | Sprint 20 | Map Partner Data SOAP/XML request fields into the canonical Partner Data request model                                          |
+|   7 | **Partner Data REST → Canonical Mapping**     | Backend | Sprint 20 | Map Partner Data REST/JSON request fields into the canonical Partner Data request model                                         |
+|   8 | **Partner Data → NetReveal REST Adapter**     | Backend | Sprint 20 | Map canonical Partner Data fields to corresponding NetReveal REST fields and construct downstream request                       |
+|   9 | **NetReveal REST Client Integration**         | Backend | Sprint 20 | Implement NetReveal REST HTTP client, endpoint configuration, headers, correlation ID, timeout and downstream response handling |
+|  10 | **Partner Data Request E2E Integration**      | Backend | Sprint 20 | Complete SOAP/REST → validation → canonical model → NetReveal REST request flow and validate integration scenarios              |
+
