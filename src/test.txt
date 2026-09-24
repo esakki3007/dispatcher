@@ -75,3 +75,18 @@ SOAP Request │ ▼ XML Parsing │ ▼ XSD Validation │ ▼ Valid Request RE
 |   9 | **NetReveal REST Client Integration**         | Backend | Sprint 20 | Implement NetReveal REST HTTP client, endpoint configuration, headers, correlation ID, timeout and downstream response handling |
 |  10 | **Partner Data Request E2E Integration**      | Backend | Sprint 20 | Complete SOAP/REST → validation → canonical model → NetReveal REST request flow and validate integration scenarios              |
 
+
+
+| No. | Task                                                | Area    | Sprint    | Remark                                                                                                              |
+| --: | --------------------------------------------------- | ------- | --------- | ------------------------------------------------------------------------------------------------------------------- |
+|   1 | **NetReveal Response → Canonical Response Mapping** | Backend | Sprint 21 | Map NetReveal REST response fields into the common canonical response model                                         |
+|   2 | **Partner Data SOAP Response Transformation**       | Backend | Sprint 21 | Transform canonical/NetReveal response into the required Partner Data SOAP XML response                             |
+|   3 | **Partner Data REST Response Transformation**       | Backend | Sprint 21 | Transform canonical/NetReveal response into the required Partner Data REST JSON response                            |
+|   4 | **Partner Data End-to-End SOAP & REST Flow**        | Backend | Sprint 21 | Complete and validate SOAP → NetReveal → SOAP and REST → NetReveal → REST flows                                     |
+|   5 | **Payment Data SOAP & REST API Integration**        | Backend | Sprint 21 | Implement Payment Data SOAP/REST endpoints, request parsing and response handling                                   |
+|   6 | **Payment Data Validation & Canonical Mapping**     | Backend | Sprint 21 | Implement Payment Data XSD/JSON validation and SOAP/REST → canonical request transformation                         |
+|   7 | **Payment Data → NetReveal REST Adapter**           | Backend | Sprint 21 | Map Payment Data canonical request to NetReveal REST fields and invoke downstream API                               |
+|   8 | **Payment Data Response Transformation**            | Backend | Sprint 21 | Transform NetReveal response into canonical response and then into required SOAP XML or REST JSON                   |
+|   9 | **Error Handling & Resilience**                     | Backend | Sprint 21 | Implement validation errors, authentication errors, NetReveal errors, timeout/retry handling and SOAP Fault mapping |
+|  10 | **Partner & Payment E2E Integration Testing**       | Backend | Sprint 21 | Validate complete SOAP/REST request and response flows, mapping scenarios and negative cases                        |
+
