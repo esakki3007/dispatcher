@@ -1,92 +1,110 @@
-At a high level, the architecture consists of the following layers:
+@startuml
+title GRACE - Partner Screening Flow (checkCustomerList)
 
-┌─────────────────────────────────────────────────────────────┐
-│                    External Consumers                       │
-│                                                             │
-│             SOAP Partners       REST Partners               │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   GRACE API / Transport Layer               │
-│                                                             │
-│        SOAP Endpoints              REST Endpoints           │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 Validation & Contract Layer                 │
-│                                                             │
-│        XSD Validation             JSON Schema Validation   │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 Partner/API Adapter Layer                   │
-│                                                             │
-│     Partner-specific Request / Response Transformation     │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Canonical Model Layer                    │
-│                                                             │
-│       Common internal request / response representation    │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                Application / Orchestration Layer            │
-│                                                             │
-│       Partner Screening     Payment Screening               │
-│                              │                              │
-│                       Business Workflow                     │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  NetReveal Integration Layer                │
-│                                                             │
-│     Request Transformation → HTTP Client → NetReveal       │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-                       ┌─────────────┐
-                       │  NetReveal  │
-                       │  Downstream │
-                       └─────────────┘
+autonumber
+
+actor Consumer
+
+participant "SOAP Route\ncheck-customer-list.route.ts" as Route
+participant "XML Parser\ninfrastructure/xml" as XMLParser
+participant "CheckCustomerListAdapter\nadapters/partner" as Adapter
+participant "Canonical Request\nPartnerScreeningRequest" as CanonicalReq
+participant "PartnerScreeningService\nservices" as Service
+participant "NetReveal Request Mapper\nnetreveal/partner-screening" as ReqMapper
+participant "NetReveal Client\nnetreveal/partner-screening" as NRClient
+participant "NetReveal" as NetReveal
+participant "NetReveal Response Mapper\nnetreveal/partner-screening" as ResMapper
+participant "Canonical Response\nPartnerScreeningResult" as CanonicalRes
+participant "SOAP Response Adapter\nadapters/partner" as ResponseAdapter
+participant "XML Builder\ninfrastructure/xml" as XMLBuilder
 
 
+== Consumer Request ==
+
+Consumer -> Route: SOAP POST /checkCustomerList
+activate Route
+
+Route -> XMLParser: Parse SOAP XML
+activate XMLParser
+
+XMLParser --> Route: CheckCustomerListSoapRequest
+deactivate XMLParser
 
 
-SOAP Request │ ▼ XML Parsing │ ▼ XSD Validation │ ▼ Valid Request REST Request │ ▼ JSON Parsing │ ▼ JSON Schema Validation │ ▼ Valid Request
+== Legacy DTO → Canonical ==
+
+Route -> Adapter: toCanonical(soapRequest, correlationId)
+activate Adapter
+
+Adapter -> Adapter: Map SOAP fields\nkundennummer → customerNumber\nname → name\nstaatsangehoerigkeit → nationality\ngeburtsortLand → placeOfBirthCountry\n...\nreserve11 → screening rule
+
+Adapter --> Route: PartnerScreeningRequest
+deactivate Adapter
 
 
-| No. | Task                                          | Area    | Sprint    | Remark                                                                                                                          |
-| --: | --------------------------------------------- | ------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
-|   1 | **GRACE Legacy API Setup & Connectivity**     | Backend | Sprint 20 | Set up Fastify API structure, environment configuration, legacy API connectivity and required endpoint configuration            |
-|   2 | **Basic Authentication & User DB Validation** | Backend | Sprint 20 | Implement Basic Auth for Partner Data and validate user credentials/user details against application DB                         |
-|   3 | **SOAP & REST Transport Layer**               | Backend | Sprint 20 | Implement SOAP and REST endpoints, SOAP XML parsing, REST JSON handling and common request/response processing                  |
-|   4 | **SOAP XSD & REST JSON Schema Validation**    | Backend | Sprint 20 | Implement contract-level validation for SOAP/XML and REST/JSON requests                                                         |
-|   5 | **Canonical Request & Response Model**        | Backend | Sprint 20 | Define common internal models for Partner and Payment requests/responses independent of SOAP, REST and NetReveal contracts      |
-|   6 | **Partner Data SOAP → Canonical Mapping**     | Backend | Sprint 20 | Map Partner Data SOAP/XML request fields into the canonical Partner Data request model                                          |
-|   7 | **Partner Data REST → Canonical Mapping**     | Backend | Sprint 20 | Map Partner Data REST/JSON request fields into the canonical Partner Data request model                                         |
-|   8 | **Partner Data → NetReveal REST Adapter**     | Backend | Sprint 20 | Map canonical Partner Data fields to corresponding NetReveal REST fields and construct downstream request                       |
-|   9 | **NetReveal REST Client Integration**         | Backend | Sprint 20 | Implement NetReveal REST HTTP client, endpoint configuration, headers, correlation ID, timeout and downstream response handling |
-|  10 | **Partner Data Request E2E Integration**      | Backend | Sprint 20 | Complete SOAP/REST → validation → canonical model → NetReveal REST request flow and validate integration scenarios              |
+Route -> Service: execute(canonicalRequest)
+activate Service
 
 
+== Canonical → NetReveal Request ==
 
-| No. | Task                                                | Area    | Sprint    | Remark                                                                                                              |
-| --: | --------------------------------------------------- | ------- | --------- | ------------------------------------------------------------------------------------------------------------------- |
-|   1 | **NetReveal Response → Canonical Response Mapping** | Backend | Sprint 21 | Map NetReveal REST response fields into the common canonical response model                                         |
-|   2 | **Partner Data SOAP Response Transformation**       | Backend | Sprint 21 | Transform canonical/NetReveal response into the required Partner Data SOAP XML response                             |
-|   3 | **Partner Data REST Response Transformation**       | Backend | Sprint 21 | Transform canonical/NetReveal response into the required Partner Data REST JSON response                            |
-|   4 | **Partner Data End-to-End SOAP & REST Flow**        | Backend | Sprint 21 | Complete and validate SOAP → NetReveal → SOAP and REST → NetReveal → REST flows                                     |
-|   5 | **Payment Data SOAP & REST API Integration**        | Backend | Sprint 21 | Implement Payment Data SOAP/REST endpoints, request parsing and response handling                                   |
-|   6 | **Payment Data Validation & Canonical Mapping**     | Backend | Sprint 21 | Implement Payment Data XSD/JSON validation and SOAP/REST → canonical request transformation                         |
-|   7 | **Payment Data → NetReveal REST Adapter**           | Backend | Sprint 21 | Map Payment Data canonical request to NetReveal REST fields and invoke downstream API                               |
-|   8 | **Payment Data Response Transformation**            | Backend | Sprint 21 | Transform NetReveal response into canonical response and then into required SOAP XML or REST JSON                   |
-|   9 | **Error Handling & Resilience**                     | Backend | Sprint 21 | Implement validation errors, authentication errors, NetReveal errors, timeout/retry handling and SOAP Fault mapping |
-|  10 | **Partner & Payment E2E Integration Testing**       | Backend | Sprint 21 | Validate complete SOAP/REST request and response flows, mapping scenarios and negative cases                        |
+Service -> ReqMapper: toNetRevealRequest(canonicalRequest)
+activate ReqMapper
 
+ReqMapper -> ReqMapper: Map canonical customer\ninto NetReveal DTO
+
+ReqMapper --> Service: NetRevealPartnerRequest
+deactivate ReqMapper
+
+
+== NetReveal Call ==
+
+Service -> NRClient: screen(netRevealRequest)
+activate NRClient
+
+NRClient -> NetReveal: POST /screening\nJSON request
+activate NetReveal
+
+NetReveal --> NRClient: NetRevealPartnerResponse
+deactivate NetReveal
+
+
+== NetReveal Response → Canonical ==
+
+NRClient --> Service: NetRevealPartnerResponse
+deactivate NRClient
+
+Service -> ResMapper: toCanonical(netRevealResponse)
+activate ResMapper
+
+ResMapper -> ResMapper: Interpret checkStatus\nGO / HOLD / STOP / ERROR
+
+ResMapper -> ResMapper: Identify product\nreserve15 = 25000 → EMBARGO\nreserve15 = 28000 → PEP
+
+ResMapper --> Service: PartnerScreeningResult
+deactivate ResMapper
+
+Service --> Route: PartnerScreeningResult
+deactivate Service
+
+
+== Canonical → Consumer Response ==
+
+Route -> ResponseAdapter: toSoapResponse(canonicalResponse)
+activate ResponseAdapter
+
+ResponseAdapter -> ResponseAdapter: Map canonical fields\nstatus → checkStatus\nreference → referenceNumber\ndetailedResult → detailedResult\nproductType → reserve15
+
+ResponseAdapter --> Route: CheckCustomerListSoapResponse
+deactivate ResponseAdapter
+
+Route -> XMLBuilder: Build SOAP XML
+activate XMLBuilder
+
+XMLBuilder --> Route: SOAP Envelope + Body
+deactivate XMLBuilder
+
+Route --> Consumer: HTTP 200\nSOAP XML Response
+deactivate Route
+
+@enduml
