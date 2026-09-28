@@ -1,110 +1,270 @@
-@startuml
-title GRACE - Partner Screening Flow (checkCustomerList)
+1. Consumer sends the request
 
-autonumber
+The external consumer invokes the checkCustomerList SOAP API and sends the request as a SOAP/XML message over HTTP.
 
-actor Consumer
+The request contains the customer information required for screening, such as customer number, name, nationality, date of birth, residence information, organisation unit, reference information, and the applicable reserve fields.
 
-participant "SOAP Route\ncheck-customer-list.route.ts" as Route
-participant "XML Parser\ninfrastructure/xml" as XMLParser
-participant "CheckCustomerListAdapter\nadapters/partner" as Adapter
-participant "Canonical Request\nPartnerScreeningRequest" as CanonicalReq
-participant "PartnerScreeningService\nservices" as Service
-participant "NetReveal Request Mapper\nnetreveal/partner-screening" as ReqMapper
-participant "NetReveal Client\nnetreveal/partner-screening" as NRClient
-participant "NetReveal" as NetReveal
-participant "NetReveal Response Mapper\nnetreveal/partner-screening" as ResMapper
-participant "Canonical Response\nPartnerScreeningResult" as CanonicalRes
-participant "SOAP Response Adapter\nadapters/partner" as ResponseAdapter
-participant "XML Builder\ninfrastructure/xml" as XMLBuilder
+The consumer should not need to know anything about the internal GRACE architecture or how NetReveal is integrated.
 
+2. SOAP Route receives the request
 
-== Consumer Request ==
+The request first reaches the check-customer-list route in the GRACE application.
 
-Consumer -> Route: SOAP POST /checkCustomerList
-activate Route
+The route acts as the entry point for the API and is responsible for handling the incoming HTTP/SOAP request.
 
-Route -> XMLParser: Parse SOAP XML
-activate XMLParser
+At this stage, the route should mainly coordinate the request flow rather than contain business logic.
 
-XMLParser --> Route: CheckCustomerListSoapRequest
-deactivate XMLParser
+The route:
 
+Receives the HTTP request.
+Extracts the SOAP payload.
+Obtains the correlation ID or creates one if required.
+Passes the SOAP payload to the XML parser.
+Invokes the appropriate adapter.
+Calls the screening service.
+Converts the final result into a SOAP response.
+Returns the response to the consumer.
+3. SOAP XML is parsed
 
-== Legacy DTO → Canonical ==
+The SOAP request is passed to the XML parser.
 
-Route -> Adapter: toCanonical(soapRequest, correlationId)
-activate Adapter
+The XML parser is responsible only for converting the incoming XML structure into a usable application object.
 
-Adapter -> Adapter: Map SOAP fields\nkundennummer → customerNumber\nname → name\nstaatsangehoerigkeit → nationality\ngeburtsortLand → placeOfBirthCountry\n...\nreserve11 → screening rule
+For example, the SOAP XML may contain fields such as:
 
-Adapter --> Route: PartnerScreeningRequest
-deactivate Adapter
+kundennummer
+name
+orgUnitId
+staatsangehoerigkeit
+geburtsortLand
+wohnortStrasse
+wohnortOrt
+wohnortLand
+birthyear
+reserve11
 
+The XML parser converts these XML elements into a CheckCustomerListSoapRequest DTO.
 
-Route -> Service: execute(canonicalRequest)
-activate Service
+At this stage, the application is still dealing with the legacy SOAP contract.
 
+The parser should not decide what reserve11 means or how the customer should be screened. Those responsibilities belong to the adapter/business layer.
 
-== Canonical → NetReveal Request ==
+4. Adapter transforms the SOAP request into the Canonical Request
 
-Service -> ReqMapper: toNetRevealRequest(canonicalRequest)
-activate ReqMapper
+The parsed SOAP DTO is passed to the CheckCustomerListAdapter.
 
-ReqMapper -> ReqMapper: Map canonical customer\ninto NetReveal DTO
+This adapter is responsible for isolating the legacy SOAP contract from the internal application model.
 
-ReqMapper --> Service: NetRevealPartnerRequest
-deactivate ReqMapper
+It maps the legacy field names to the canonical field names.
 
+For example:
 
-== NetReveal Call ==
+kundennummer          → customerNumber
+name                  → name
+staatsangehoerigkeit  → nationality
+geburtsortLand        → placeOfBirthCountry
+wohnortStrasse        → residenceStreet
+wohnortOrt            → residenceCity
+wohnortLand           → residenceCountry
+birthyear             → dateOfBirth
+einrichtungsdatum     → creationDate
+kundentyp             → customerType
+referenz              → referenceNumber
 
-Service -> NRClient: screen(netRevealRequest)
-activate NRClient
+The adapter also handles partner-specific transformation rules.
 
-NRClient -> NetReveal: POST /screening\nJSON request
-activate NetReveal
+For example, if a particular reserve field determines whether an additional screening is required, that partner-specific rule is interpreted here and represented in the canonical request.
 
-NetReveal --> NRClient: NetRevealPartnerResponse
-deactivate NetReveal
+The result of this step is:
 
+PartnerScreeningRequest
 
-== NetReveal Response → Canonical ==
+The rest of the application no longer needs to understand the original SOAP field names.
 
-NRClient --> Service: NetRevealPartnerResponse
-deactivate NRClient
+5. Canonical request is passed to the Screening Service
 
-Service -> ResMapper: toCanonical(netRevealResponse)
-activate ResMapper
+The route passes the canonical request to the PartnerScreeningService.
 
-ResMapper -> ResMapper: Interpret checkStatus\nGO / HOLD / STOP / ERROR
+The canonical model acts as the common contract between the API-specific adapter and the business/service layer.
 
-ResMapper -> ResMapper: Identify product\nreserve15 = 25000 → EMBARGO\nreserve15 = 28000 → PEP
+For example, instead of the service receiving:
 
-ResMapper --> Service: PartnerScreeningResult
-deactivate ResMapper
+kundennummer
+geburtsortLand
+wohnortOrt
+kundentyp
 
-Service --> Route: PartnerScreeningResult
-deactivate Service
+it receives a consistent model such as:
 
+customerNumber
+placeOfBirthCountry
+residenceCity
+customerType
 
-== Canonical → Consumer Response ==
+This makes the service independent of the external protocol.
 
-Route -> ResponseAdapter: toSoapResponse(canonicalResponse)
-activate ResponseAdapter
+The service is responsible for orchestrating the screening operation.
 
-ResponseAdapter -> ResponseAdapter: Map canonical fields\nstatus → checkStatus\nreference → referenceNumber\ndetailedResult → detailedResult\nproductType → reserve15
+6. Service prepares the NetReveal request
 
-ResponseAdapter --> Route: CheckCustomerListSoapResponse
-deactivate ResponseAdapter
+The screening service passes the canonical request to the NetReveal request mapper.
 
-Route -> XMLBuilder: Build SOAP XML
-activate XMLBuilder
+The mapper converts the internal canonical model into the specific request structure required by NetReveal.
 
-XMLBuilder --> Route: SOAP Envelope + Body
-deactivate XMLBuilder
+For example:
 
-Route --> Consumer: HTTP 200\nSOAP XML Response
-deactivate Route
+Canonical customerNumber
+        ↓
+NetReveal party.id
 
-@enduml
+Canonical name
+        ↓
+NetReveal party.name
+
+Canonical nationality
+        ↓
+NetReveal party.nationality
+
+This mapping is kept separate from the service so that NetReveal-specific field names and structures do not leak into the business logic.
+
+The result is a:
+
+NetRevealPartnerRequest
+7. NetReveal client sends the request
+
+The service passes the NetReveal request to the NetReveal client.
+
+The NetReveal client is responsible for the actual communication with the downstream NetReveal system.
+
+It handles technical concerns such as:
+
+HTTP request creation
+NetReveal endpoint
+Authentication
+Headers
+Timeout
+Circuit breaker
+Retry, where applicable
+Correlation ID propagation
+Technical error handling
+Logging and monitoring
+
+The service should not directly contain this HTTP communication logic.
+
+The flow is therefore:
+
+Screening Service
+       ↓
+NetReveal Client
+       ↓
+NetReveal
+8. NetReveal processes the screening
+
+NetReveal receives the request and performs the required screening.
+
+NetReveal returns the screening result to GRACE.
+
+The response can contain information such as:
+
+checkStatus
+detailedResult
+referenceNumber
+reserve15
+
+The checkStatus represents the screening outcome, while fields such as reserve15 can identify the applicable product/result type according to the agreed integration contract.
+
+For example:
+
+checkStatus = GO
+
+indicates that the corresponding screening result is GO.
+
+Similarly:
+
+checkStatus = HOLD
+
+indicates that the result requires further handling according to the business flow.
+
+9. NetReveal response is transformed into the Canonical Response
+
+The NetReveal client returns the NetReveal response to the screening service.
+
+The response is then passed to the NetReveal response mapper.
+
+The mapper converts the NetReveal-specific response into the common canonical response model.
+
+For example:
+
+NetReveal Response
+
+checkStatus = HOLD
+reserve15   = 25000
+
+can be represented internally as:
+
+PartnerScreeningResult
+
+status      = HOLD
+productType = EMBARGO
+
+Similarly, the applicable reserve15 value can be interpreted according to the product mapping.
+
+This is important because the rest of the application should not need to understand NetReveal-specific codes.
+
+10. Canonical response is returned to the route
+
+Once the response has been transformed, the screening service returns the canonical screening result to the SOAP route.
+
+At this point, the service has completed its responsibility.
+
+The route now has a technology-independent result such as:
+
+status
+productType
+reference
+detailedResult
+
+The route does not need to understand how NetReveal generated that result.
+
+11. Response Adapter transforms the Canonical Response into SOAP Response
+
+The route passes the canonical response to the SOAP response adapter.
+
+The response adapter performs the reverse transformation of the request adapter.
+
+It converts the canonical fields back into the fields required by the legacy SOAP contract.
+
+For example:
+
+status          → checkStatus
+reference       → referenceNumber
+detailedResult  → detailedResult
+productType     → reserve15
+
+The result is a:
+
+CheckCustomerListSoapResponse
+
+This DTO represents what the external SOAP consumer expects.
+
+12. SOAP XML response is generated
+
+The SOAP response DTO is passed to the XML builder.
+
+The XML builder creates the appropriate SOAP envelope and SOAP body according to the agreed SOAP contract/WSDL.
+
+Conceptually:
+
+CheckCustomerListSoapResponse
+             ↓
+        XML Builder
+             ↓
+      SOAP Envelope
+             +
+        SOAP Body
+
+The XML builder is responsible for XML formatting and serialization, rather than business transformation.
+
+13. SOAP response is returned to the consumer
+
+Finally, the SOAP route sends the generated SOAP response back to the consumer.
